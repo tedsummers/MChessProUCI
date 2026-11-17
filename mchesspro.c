@@ -837,6 +837,10 @@ static int check_far_traps(uint16_t target_seg, uint16_t target_off) {
 
     /* Native C evaluation traps in seg 0x0fcb */
     if (rel_seg == 0x0fcb) {
+        if (target_off == 0xc98c) {
+            cpu.ax = mcpro_eval_white_pieces(&mem[DGROUP_SEG << 4]);
+            return 1;
+        }
         if (target_off == 0xd048) {
             cpu.ax = mcpro_eval_black_pieces(&mem[DGROUP_SEG << 4]);
             return 1;

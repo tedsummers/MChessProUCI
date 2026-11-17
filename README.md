@@ -5,7 +5,7 @@
 ## Credits
 
 - **Original Program Author**: **Marty Hirsch** — creator of *MChess* and *MChess Pro*.
-- All chess search, evaluation, and opening book logic (`PRBOOK.M35` / `M35KEY.000`–`M35KEY.00F`) come from MChess Pro v3.5. This project only provides the 32-bit 80186/DOS/Unreal-Mode execution layer and UCI protocol translation.
+- All chess search, evaluation, and opening book logic (`PRBOOK.M35` / `M35KEY.000`–`M35KEY.00F`) come from MChess Pro v3.5. This project provides the 32-bit 80186/DOS/Unreal-Mode execution layer, native C ports of the piece-evaluation routines ([mcpro_eval.h](mcpro_eval.h)), and UCI protocol translation.
 
 ## Features
 
