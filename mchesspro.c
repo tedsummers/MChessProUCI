@@ -680,6 +680,8 @@ static void handle_int(uint8_t vec) {
  * ========================================================================= */
 
 static int pv_hook_enabled = 0;
+static uint64_t last_info_ms = 0;
+static uint32_t last_info_nodes = 0;
 
 /* UCI Engine Options */
 static int opt_hash_mb = 10;
@@ -753,9 +755,12 @@ static void emit_uci_pv(int16_t score) {
     uint32_t nodes = ds_rw(0x8fe8) | ((uint32_t)ds_rw(0x8fea) << 16);
     int depth = ds_rb(0xda5a);
     if (depth <= 0) depth = 1;
-    uint64_t elapsed = get_ms() - search_start_ms;
+    uint64_t now = get_ms();
+    uint64_t elapsed = now - search_start_ms;
     if (elapsed == 0) elapsed = 1;
     uint64_t nps = ((uint64_t)nodes * 1000ULL) / elapsed;
+    last_info_ms = now;
+    last_info_nodes = nodes;
 
     char score_str[32];
     if (score > 19950) {
@@ -791,6 +796,25 @@ static void emit_uci_pv(int16_t score) {
         }
     }
     printf("\n");
+    fflush(stdout);
+}
+
+static void emit_uci_periodic_info(uint64_t now) {
+    if (!pv_hook_enabled) return;
+    if (now - last_info_ms < 300) return;
+    uint32_t nodes = ds_rw(0x8fe8) | ((uint32_t)ds_rw(0x8fea) << 16);
+    if (nodes <= last_info_nodes) return;
+    int depth = ds_rb(0xda5a);
+    if (depth <= 0) return;
+
+    uint64_t elapsed = now - search_start_ms;
+    if (elapsed == 0) elapsed = 1;
+    uint64_t nps = ((uint64_t)nodes * 1000ULL) / elapsed;
+    last_info_ms = now;
+    last_info_nodes = nodes;
+
+    printf("info depth %d nodes %u nps %llu time %llu\n",
+           depth, nodes, (unsigned long long)nps, (unsigned long long)elapsed);
     fflush(stdout);
 }
 
@@ -2034,7 +2058,9 @@ static void run_until_trap(uint64_t max_steps) {
         if ((step & 0x7FFu) == 0) {
             update_bda_ticks();
             if (search_active) {
-                if (stop_requested || (search_deadline_ms && get_ms() >= search_deadline_ms)) {
+                uint64_t now = get_ms();
+                emit_uci_periodic_info(now);
+                if (stop_requested || (search_deadline_ms && now >= search_deadline_ms)) {
                     /* Trigger clean search abort in MChessPro */
                     ds_wb(0x4e11, 1);
                     ds_wb(0xdac0, 1);
@@ -2495,6 +2521,8 @@ static void cmd_go(const char *line) {
 
     stop_requested = 0;
     search_start_ms = get_ms();
+    last_info_ms = search_start_ms;
+    last_info_nodes = 0;
     search_deadline_ms = 0;
 
     if (depth > 0) {
