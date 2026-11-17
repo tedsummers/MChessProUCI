@@ -2165,6 +2165,22 @@ static void restore_startpos(void) {
     apply_engine_options();
 }
 
+static void sync_root_ep_and_check(uint8_t ep_sq) {
+    ds_wb(0xd54c, ep_sq);
+    ds_wb(0xd54d, ep_sq);
+    uint8_t in_chk = ds_rb(0xa772);
+    ds_wb(0xa773, in_chk);
+    uint16_t move_num = ds_rw(0xde00);
+    uint16_t ep_seg = ds_rw(0x26ac);
+    if (ep_seg != 0) {
+        wb(phys(ep_seg, (uint16_t)(0x2b8a + current_stm * 0xcb + move_num)), ep_sq);
+    }
+    uint16_t chk_seg = ds_rw(0x26ae);
+    if (chk_seg != 0) {
+        wb(phys(chk_seg, (uint16_t)(0x10e + current_stm * 0xcb + move_num)), in_chk);
+    }
+}
+
 static void make_uci_move(const char *uci_str) {
     if (strlen(uci_str) < 4) return;
     int f1 = uci_str[0] - 'a';
@@ -2206,15 +2222,7 @@ static void make_uci_move(const char *uci_str) {
     current_stm ^= 1;
     ds_wb(0x4d4c, (uint8_t)current_stm);
     ds_wb(0xd54a, (uint8_t)current_stm);
-    {
-        uint8_t new_ep = ds_rb(0xd54c);
-        ds_wb(0xd54d, new_ep);
-        uint16_t hist_seg = ds_rw(0x26ac);
-        uint16_t move_num = ds_rw(0xde00);
-        if (hist_seg != 0) {
-            wb(phys(hist_seg, (uint16_t)(0x2b8a + current_stm * 0xcb + move_num)), new_ep);
-        }
-    }
+    sync_root_ep_and_check(ds_rb(0xd54c));
 }
 
 static void setup_fen_position(const char *fen) {
@@ -2295,6 +2303,7 @@ static void setup_fen_position(const char *fen) {
 
     ds_wb(0x4d4c, (uint8_t)current_stm);
     ds_wb(0xd54a, (uint8_t)current_stm);
+    ds_wb(0xd63c, (uint8_t)current_stm);
     call_far(LOAD_SEG + 0x2f95, 0xa5d0, 5000000ULL); /* setup_accept */
 
     /* Override castling, ep, halfmove, and recompute hash */
@@ -2304,15 +2313,7 @@ static void setup_fen_position(const char *fen) {
     ds_wb(0x3039, bq ? 0 : 0xFF);
     ds_wb(0x8fee, (!wk && !wq) ? 1 : 0);
     ds_wb(0xe14e, (!bk && !bq) ? 1 : 0);
-    ds_wb(0xd54c, ep_sq);
-    ds_wb(0xd54d, ep_sq);
-    {
-        uint16_t hist_seg = ds_rw(0x26ac);
-        uint16_t move_num = ds_rw(0xde00);
-        if (hist_seg != 0) {
-            wb(phys(hist_seg, (uint16_t)(0x2b8a + current_stm * 0xcb + move_num)), ep_sq);
-        }
-    }
+    sync_root_ep_and_check(ep_sq);
     ds_wb(0xdc75, (uint8_t)halfmove);
     call_far(LOAD_SEG + 0x3f47, 0x1a26, 1000000ULL);
     apply_engine_options();
