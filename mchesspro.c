@@ -203,6 +203,7 @@ static int search_active = 0;
 static uint16_t search_initial_ply = 0;
 static volatile int stop_requested = 0;
 static volatile int ponder_hit = 0;
+static uint64_t ponder_budget_ms = 0;
 
 static void update_bda_ticks(void) {
     uint64_t elapsed = get_ms() - boot_ms;
@@ -2060,6 +2061,10 @@ static void run_until_trap(uint64_t max_steps) {
             if (search_active) {
                 uint64_t now = get_ms();
                 emit_uci_periodic_info(now);
+                if (ponder_hit) {
+                    ponder_hit = 0;
+                    search_deadline_ms = now + (ponder_budget_ms ? ponder_budget_ms : 1000ULL);
+                }
                 if (stop_requested || (search_deadline_ms && now >= search_deadline_ms)) {
                     /* Trigger clean search abort in MChessPro */
                     ds_wb(0x4e11, 1);
@@ -2191,17 +2196,25 @@ static void make_uci_move(const char *uci_str) {
     ds_wb(0x4d4c, (uint8_t)current_stm);
     ds_wb(0xd54a, (uint8_t)current_stm);
 
-    /* Call make_move(0xce4c, stm, ply+1, 0xce4f, 0xce50) */
-    uint16_t ply = ds_rw(0xd644) + 1;
+    /* Call make_move(0xce4c, stm, 0, 0xce4f, 0xce50) */
     push16(0xce4c);
     push16((uint16_t)current_stm);
-    push16(ply);
+    push16(0);
     push16(0xce4f);
     push16(0xce50);
     call_far(LOAD_SEG + 0x0fcb, 0xb312, 1000000ULL);
     current_stm ^= 1;
     ds_wb(0x4d4c, (uint8_t)current_stm);
     ds_wb(0xd54a, (uint8_t)current_stm);
+    {
+        uint8_t new_ep = ds_rb(0xd54c);
+        ds_wb(0xd54d, new_ep);
+        uint16_t hist_seg = ds_rw(0x26ac);
+        uint16_t move_num = ds_rw(0xde00);
+        if (hist_seg != 0) {
+            wb(phys(hist_seg, (uint16_t)(0x2b8a + current_stm * 0xcb + move_num)), new_ep);
+        }
+    }
 }
 
 static void setup_fen_position(const char *fen) {
@@ -2291,7 +2304,15 @@ static void setup_fen_position(const char *fen) {
     ds_wb(0x3039, bq ? 0 : 0xFF);
     ds_wb(0x8fee, (!wk && !wq) ? 1 : 0);
     ds_wb(0xe14e, (!bk && !bq) ? 1 : 0);
-    ds_wb((uint16_t)(0xd54c + ds_rw(0xd644)), ep_sq);
+    ds_wb(0xd54c, ep_sq);
+    ds_wb(0xd54d, ep_sq);
+    {
+        uint16_t hist_seg = ds_rw(0x26ac);
+        uint16_t move_num = ds_rw(0xde00);
+        if (hist_seg != 0) {
+            wb(phys(hist_seg, (uint16_t)(0x2b8a + current_stm * 0xcb + move_num)), ep_sq);
+        }
+    }
     ds_wb(0xdc75, (uint8_t)halfmove);
     call_far(LOAD_SEG + 0x3f47, 0x1a26, 1000000ULL);
     apply_engine_options();
@@ -2318,6 +2339,8 @@ static DWORD WINAPI stdin_thread_fn(LPVOID arg) {
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
         if (search_active && (strcmp(line, "stop") == 0 || strcmp(line, "quit") == 0)) {
             stop_requested = 1;
+        } else if (search_active && strcmp(line, "ponderhit") == 0) {
+            ponder_hit = 1;
         }
         EnterCriticalSection(&q_lock);
         int next = (cmd_q_tail + 1) % CMD_Q_SIZE;
@@ -2344,6 +2367,8 @@ static void *stdin_thread_fn(void *arg) {
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
         if (search_active && (strcmp(line, "stop") == 0 || strcmp(line, "quit") == 0)) {
             stop_requested = 1;
+        } else if (search_active && strcmp(line, "ponderhit") == 0) {
+            ponder_hit = 1;
         }
         pthread_mutex_lock(&q_lock);
         int next = (cmd_q_tail + 1) % CMD_Q_SIZE;
@@ -2495,13 +2520,16 @@ static void cmd_go(const char *line) {
     int movetime = 0;
     int wtime = 0, btime = 0, winc = 0, binc = 0, movestogo = 0;
     int infinite = 0;
+    int ponder = 0;
 
     const char *p = line + 2;
     char tok[64];
     while (sscanf(p, "%63s", tok) == 1) {
         p = strstr(p, tok) + strlen(tok);
-        if (strcmp(tok, "infinite") == 0 || strcmp(tok, "ponder") == 0) {
+        if (strcmp(tok, "infinite") == 0) {
             infinite = 1;
+        } else if (strcmp(tok, "ponder") == 0) {
+            ponder = 1;
         } else if (strcmp(tok, "depth") == 0 && sscanf(p, "%d", &depth) == 1) {
             p = strchr(p, ' ') ? p : p;
         } else if (strcmp(tok, "movetime") == 0 && sscanf(p, "%d", &movetime) == 1) {
@@ -2520,12 +2548,29 @@ static void cmd_go(const char *line) {
     ds_wb(0xdac0, 0);
 
     stop_requested = 0;
+    ponder_hit = 0;
+    ponder_budget_ms = 0;
     search_start_ms = get_ms();
     last_info_ms = search_start_ms;
     last_info_nodes = 0;
     search_deadline_ms = 0;
 
-    if (depth > 0) {
+    if (ponder) {
+        ds_wb(0xd8f6, 6); /* Ponder infinitely until ponderhit or stop */
+        if (movetime > 0) {
+            ponder_budget_ms = (uint64_t)movetime;
+        } else if (wtime > 0 || btime > 0) {
+            int my_time = (current_stm == 0) ? wtime : btime;
+            int my_inc = (current_stm == 0) ? winc : binc;
+            int mtg = (movestogo > 0) ? movestogo : 30;
+            int budget = my_time / mtg + (my_inc * 3) / 4;
+            if (budget > my_time / 2) budget = my_time / 2;
+            if (budget < 50) budget = 50;
+            ponder_budget_ms = (uint64_t)budget;
+        } else {
+            ponder_budget_ms = 1000;
+        }
+    } else if (depth > 0) {
         ds_wb(0xd8f6, 3); /* Fixed depth */
         ds_ww(0x1952, (uint16_t)depth);
     } else if (infinite) {
