@@ -25,6 +25,7 @@
 #endif
 
 #include "mcpro_data.h"
+#include "mcpro_eval.h"
 
 /* =========================================================================
  * Memory & CPU State
@@ -793,6 +794,8 @@ static void emit_uci_pv(int16_t score) {
     fflush(stdout);
 }
 
+static void run_until_trap(uint64_t max_steps);
+
 static int check_far_traps(uint16_t target_seg, uint16_t target_off) {
     /* Return 1 if handled (so caller does not jump into target) */
     uint16_t rel_seg = target_seg - LOAD_SEG;
@@ -828,6 +831,14 @@ static int check_far_traps(uint16_t target_seg, uint16_t target_off) {
                 if (dst + i < MEM_SIZE) mem[dst + i] = b;
                 else if (dst + i < EXT_MEM_SIZE) ext_mem[dst + i] = b;
             }
+            return 1;
+        }
+    }
+
+    /* Native C evaluation traps in seg 0x0fcb */
+    if (rel_seg == 0x0fcb) {
+        if (target_off == 0xd048) {
+            cpu.ax = mcpro_eval_black_pieces(&mem[DGROUP_SEG << 4]);
             return 1;
         }
     }
